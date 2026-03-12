@@ -1,0 +1,13 @@
+name: hashnode-blog-writer
+version: 1.0.0
+description: >
+  Dual-agent blog writing workflow (Writer + Reviewer) with iterative quality gates.
+  Publishes to Hashnode with cover images. Prevents common mistakes through codified
+  review criteria.
+triggers:
+  - "write a blog"
+  - "publish to hashnode"
+  - "blog about"
+  - "write blog post"
+  - "hashnode blog"
+  - "English blog"
