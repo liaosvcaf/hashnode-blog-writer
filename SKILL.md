@@ -1,12 +1,12 @@
 ---
 name: hashnode-blog-writer
-version: 1.0.0
+version: 1.1.0
 description: >
   Write high-quality English blog posts and publish to Hashnode with cover images.
-  Dual-agent workflow: Writer (Opus) drafts, Reviewer (Sonnet) checks against quality
-  gate, iterate until all criteria pass, then publish.
-  Input is a Google Doc URL, local file, or topic description.
-  Use when user says "write a blog", "publish to hashnode", "blog about X",
+  Two workflows: (A) Write from scratch - Writer (Opus) drafts, Reviewer (Sonnet) checks, iterate until pass, then publish.
+  (B) Sync existing - Extract from Jekyll post, upload cover, publish.
+  Input is a Google Doc URL, local file, topic description, or existing Jekyll post slug.
+  Use when user says "write a blog", "publish to hashnode", "sync to hashnode", "blog about X",
   or provides a Google Doc URL for blog conversion.
 category: workflow-automation
 author: skill-engineer
@@ -63,6 +63,92 @@ These are the operator's explicit preferences. Every blog post MUST follow them:
 4. **No personal info leaks.** NEVER mention: real name, employer, location, workplace, family members, financial details, or anything from USER.md.
 5. **Timely framing.** "Just days ago", "last week" — not vague "earlier this year" or "recently".
 6. **Opinionated.** Have a clear thesis. State it plainly. Don't hedge.
+
+---
+
+## Step 0: Determine Input Type
+
+### A. NEW article (write from scratch)
+→ Follow Steps 1-6 (Writer → Reviewer → Publish)
+
+### B. EXISTING article (sync from Jekyll/GitHub)
+→ Skip to Step 0.5 (Sync Workflow)
+
+---
+
+## Step 0.5: Sync Existing Article (Alternative Entry Point)
+
+When source is a complete Jekyll post already published to GitHub Pages:
+
+**Typical trigger:** "sync this article to hashnode", "publish to hashnode" (with no Google Doc URL)
+
+**Location:** `/Users/liao/public-workspace/chunhualiao.github.io/_posts/YYYY-MM-DD-slug.md`
+
+**0.5.1 Identify the post**
+```bash
+# User provides slug or title
+SLUG="the-wisdom-stack-why-ai-agents-are-finally-making-timeless-principles-actually-w"
+
+# Find the file
+POST_FILE=$(ls /Users/liao/public-workspace/chunhualiao.github.io/_posts/*-${SLUG}.md)
+
+if [ ! -f "$POST_FILE" ]; then
+  echo "ERROR: Post not found for slug: $SLUG"
+  exit 1
+fi
+```
+
+**0.5.2 Extract metadata from frontmatter**
+```bash
+TITLE=$(grep "^title:" "$POST_FILE" | sed 's/^title: "//' | sed 's/"$//')
+SLUG=$(grep "^slug:" "$POST_FILE" | sed 's/^slug: //')
+COVER_PATH=$(grep "^cover_image:" "$POST_FILE" | sed 's/^cover_image: "//' | sed 's/"$//')
+TAGS=$(grep "^tags:" "$POST_FILE" | sed 's/^tags: \[//' | sed 's/\]$//' | tr ',' '\n' | sed 's/^ *//' | sed 's/ *$//')
+
+echo "Title: $TITLE"
+echo "Slug: $SLUG"
+echo "Cover: $COVER_PATH"
+```
+
+**0.5.3 Extract content (skip frontmatter)**
+```bash
+# Skip YAML frontmatter, get markdown content
+awk '/^---$/{if(++c==2){f=1;next}}f' "$POST_FILE" > /tmp/blog-content.md
+
+# Verify content exists
+if [ ! -s /tmp/blog-content.md ]; then
+  echo "ERROR: No content extracted"
+  exit 1
+fi
+
+echo "Content extracted: $(wc -w /tmp/blog-content.md | awk '{print $1}') words"
+```
+
+**0.5.4 Handle cover image**
+```bash
+# Convert Jekyll path to filesystem path
+if [[ "$COVER_PATH" == /assets/* ]]; then
+  # Relative to repo root
+  FULL_COVER_PATH="/Users/liao/public-workspace/chunhualiao.github.io${COVER_PATH}"
+elif [[ "$COVER_PATH" == assets/* ]]; then
+  FULL_COVER_PATH="/Users/liao/public-workspace/chunhualiao.github.io/${COVER_PATH}"
+else
+  # Already absolute or external URL
+  FULL_COVER_PATH="$COVER_PATH"
+fi
+
+if [ -f "$FULL_COVER_PATH" ]; then
+  cp "$FULL_COVER_PATH" /tmp/blog-cover.png
+  echo "✅ Cover image ready: $FULL_COVER_PATH"
+else
+  echo "⚠️  WARNING: Cover image not found at $FULL_COVER_PATH"
+  echo "Will attempt to generate one..."
+  # Fall back to Step 5 image generation
+fi
+```
+
+**0.5.5 Proceed to publish**
+→ Skip to **Step 5** (Upload cover) then **Step 6** (Publish)
 
 ---
 
@@ -283,14 +369,43 @@ resulting in missing Open Graph preview cards. Always re-upload to a public CDN.
 
 ## Step 6: Publish to Hashnode
 
-### Check for existing post first
+### Validate API key first
+
+**CRITICAL:** Test API key before attempting to publish.
+
+```bash
+API_KEY="$HASHNODE_API_KEY"
+
+# Validate key works
+TEST=$(curl -s -X POST https://gql.hashnode.com/ \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $API_KEY" \
+  -d '{"query": "query { me { id username } }"}')
+
+if echo "$TEST" | jq -e '.errors[] | select(.extensions.code == "UNAUTHENTICATED")' > /dev/null 2>&1; then
+  echo "❌ ERROR: Hashnode API key expired or invalid"
+  echo ""
+  echo "Current key (first 8 chars): ${API_KEY:0:8}..."
+  echo ""
+  echo "To fix:"
+  echo "1. Get new key from https://hashnode.com/settings/developer"
+  echo "2. Update ~/.openclaw/openclaw.json:"
+  echo "   \"HASHNODE_API_KEY\": \"<new-key>\""
+  echo ""
+  exit 1
+fi
+
+USERNAME=$(echo "$TEST" | jq -r '.data.me.username')
+echo "✅ API key valid (user: $USERNAME)"
+```
+
+### Check for existing post
 
 **CRITICAL:** Always check if a post with the target slug already exists.
 If it exists, UPDATE it. NEVER create duplicates.
 
 ```bash
 SLUG="<slug-from-title>"
-API_KEY="$HASHNODE_API_KEY"
 HOST="$HASHNODE_HOST"
 
 # Query for existing post
@@ -371,9 +486,40 @@ print(f"Published: {post['url']}")
 ```
 
 ### Post-publish verification
+
+**MANDATORY:** Verify the post is actually published and accessible.
+
 ```bash
-curl -s -o /dev/null -w "%{http_code}" "<PUBLISHED_URL>"
-# Must return 200
+POST_URL="<url-from-publish-response>"
+SLUG="<slug>"
+
+# Wait for propagation
+sleep 3
+
+# Verify via API (more reliable than HTTP, Cloudflare may block)
+VERIFY=$(curl -s -X POST https://gql.hashnode.com/ \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $HASHNODE_API_KEY" \
+  -d "{\"query\": \"query { publication(host: \\\"$HASHNODE_HOST\\\") { post(slug: \\\"$SLUG\\\") { id title publishedAt url coverImage { url } } } }\"}")
+
+VERIFIED_URL=$(echo "$VERIFY" | jq -r '.data.publication.post.url')
+PUBLISHED_AT=$(echo "$VERIFY" | jq -r '.data.publication.post.publishedAt')
+
+if [ "$VERIFIED_URL" != "null" ] && [ "$VERIFIED_URL" = "$POST_URL" ]; then
+  echo ""
+  echo "✅ Published successfully!"
+  echo ""
+  echo "Title: $TITLE"
+  echo "URL: $VERIFIED_URL"
+  echo "Published: $PUBLISHED_AT"
+  echo "Cover: $(echo "$VERIFY" | jq -r '.data.publication.post.coverImage.url')"
+  echo ""
+else
+  echo "❌ Verification failed"
+  echo "Expected URL: $POST_URL"
+  echo "API returned: $VERIFIED_URL"
+  exit 1
+fi
 ```
 
 ---
@@ -415,7 +561,10 @@ Use blog-to-wechat skill with URL: <PUBLISHED_HASHNODE_URL>
 | Main session blocked during generation | ALL generation done via subagents. Main stays responsive. |
 | Cover image not showing in X card | ALWAYS upload to Hashnode CDN, NEVER use Google Drive URLs. Drive requires auth/redirects that X crawlers cannot follow. |
 | **Duplicate posts created** | **ALWAYS query for existing post by slug FIRST. Update if exists, create only if new.** |
-| **Using expired API key** | **Always use the current HASHNODE_API_KEY from environment, not hardcoded/old keys.** |
+| **Using expired API key** | **Step 6: Validate API key BEFORE publishing. Test with `query { me { id } }` first.** |
+| **Not verifying publish succeeded** | **Step 6: Query API after publish to confirm post exists and URL matches.** |
+| **Can't sync existing Jekyll posts** | **Step 0.5: Added workflow to extract from Jekyll frontmatter + content.** |
+| **Cover image path mismatch** | **Step 0.5: Handle both relative (`/assets/`) and absolute paths from Jekyll frontmatter.** |
 
 ---
 
