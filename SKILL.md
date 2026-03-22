@@ -223,10 +223,23 @@ If reviewer returns FAIL:
 
 ---
 
-## Step 5: Generate Cover Image
+## Step 5: Handle Cover Image
 
-After reviewer PASS, generate a landscape cover image via Z.AI:
+After reviewer PASS, handle the cover image. Three sources in priority order:
 
+### Option A: Google Doc has cover image link (preferred)
+If source is a Google Doc with a cover image link in the first lines:
+```bash
+# Extract Google Drive image ID from doc
+DRIVE_ID=$(grep -o 'drive.google.com.*id=[^)]*' /tmp/blog-source.md | head -1 | sed 's/.*id=//')
+
+if [ -n "$DRIVE_ID" ]; then
+  # Download from Google Drive
+  curl -L "https://drive.google.com/uc?id=$DRIVE_ID" -o /tmp/blog-cover.png
+fi
+```
+
+### Option B: Generate cover image via Z.AI
 ```bash
 SKILL_DIR=$IMAGE_SKILL_DIR
 ZAI_API_KEY="<key>" python3 "$SKILL_DIR/scripts/generate.py" \
@@ -235,46 +248,67 @@ ZAI_API_KEY="<key>" python3 "$SKILL_DIR/scripts/generate.py" \
 ```
 
 **Cover image rules:**
-- Landscape 1920x1088
+- Landscape 1920x1088 or 1600x840
 - NO Chinese text (English-only or no text)
 - Visual metaphor related to the article topic
 - Scrapbook/craft paper style preferred
 
-Flatten output:
+### Upload to Reliable CDN
+
+**CRITICAL:** Hashnode CDN upload via API is UNRELIABLE (S3 auth failures common).
+**Use Imgur as the primary CDN** - it's stable, public, and works with all crawlers.
+
 ```bash
-ACTUAL=$(find /tmp/blog-cover.png -name "*.png" -type f | head -1)
-mv "$ACTUAL" /tmp/blog-cover-final.png
+# Upload to Imgur (public API, no auth needed)
+RESPONSE=$(curl -s -X POST "https://api.imgur.com/3/image" \
+  -H "Authorization: Client-ID 546c25a59c58ad7" \
+  -F "image=@/tmp/blog-cover.png")
+
+CDN_URL=$(echo "$RESPONSE" | jq -r '.data.link')
+
+# Verify image is accessible
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$CDN_URL")
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "Error: Image not accessible"
+  exit 1
+fi
+
+echo "Cover ready: $CDN_URL"
 ```
 
-Upload to **Hashnode CDN** (NOT Google Drive -- Drive URLs break X/Twitter Open Graph cards):
-
-```python
-import os, requests, json
-
-# Step 1: Get presigned upload URL
-query = '''mutation { createImageUploadURL(input: { contentType: "image/png" }) {
-  presignedPost { url fields } } }'''
-r = requests.post('https://gql.hashnode.com/',
-    headers={'Content-Type': 'application/json', 'Authorization': os.environ['HASHNODE_API_KEY']},
-    json={'query': query})
-presigned = r.json()['data']['createImageUploadURL']['presignedPost']
-
-# Step 2: Upload to S3
-with open('/tmp/blog-cover-final.png', 'rb') as f:
-    requests.post(presigned['url'], data=presigned['fields'],
-                  files={'file': ('cover.png', f, 'image/png')})
-
-# Step 3: Construct CDN URL from the key field
-key = presigned['fields']['key']
-cdn_url = f"https://cdn.hashnode.com/{key}"
-```
-
-**NEVER use Google Drive URLs for cover images.** X/Twitter crawlers cannot follow Drive redirects,
-resulting in missing Open Graph preview cards.
+**NEVER use Google Drive URLs in the final post.** X/Twitter crawlers cannot follow Drive redirects,
+resulting in missing Open Graph preview cards. Always re-upload to a public CDN.
 
 ---
 
 ## Step 6: Publish to Hashnode
+
+### Check for existing post first
+
+**CRITICAL:** Always check if a post with the target slug already exists.
+If it exists, UPDATE it. NEVER create duplicates.
+
+```bash
+SLUG="<slug-from-title>"
+API_KEY="$HASHNODE_API_KEY"
+HOST="$HASHNODE_HOST"
+
+# Query for existing post
+EXISTING=$(curl -s -X POST https://gql.hashnode.com/ \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $API_KEY" \
+  -d "{\"query\": \"query { publication(host: \\\"$HOST\\\") { post(slug: \\\"$SLUG\\\") { id } } }\"}")
+
+POST_ID=$(echo "$EXISTING" | jq -r '.data.publication.post.id')
+
+if [ "$POST_ID" != "null" ] && [ -n "$POST_ID" ]; then
+  echo "Post exists (ID: $POST_ID). Will update instead of creating new."
+  ACTION="update"
+else
+  echo "Post does not exist. Will create new."
+  ACTION="create"
+fi
+```
 
 ### Generate slug from title
 ```python
@@ -284,7 +318,7 @@ slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')[:80]
 
 **CRITICAL:** Slug derives from TITLE, never from filename.
 
-### Publish via API
+### Publish via API (create OR update)
 
 ```python
 import json, os, requests
@@ -379,7 +413,10 @@ Use blog-to-wechat skill with URL: <PUBLISHED_HASHNODE_URL>
 | Personal info leaked | Reviewer checks for name, employer, location patterns. |
 | Broken old URL after slug change | Never change slug after publishing + X posting. Get it right first time. |
 | Main session blocked during generation | ALL generation done via subagents. Main stays responsive. |
-| Cover image not showing in X card | ALWAYS upload to Hashnode CDN, NEVER use Google Drive URLs. Drive requires auth/redirects that X crawlers cannot follow. |
+| Cover image not showing in X card | Upload to Imgur CDN, NEVER use Google Drive URLs. Drive requires auth/redirects that X crawlers cannot follow. |
+| **Duplicate posts created** | **ALWAYS query for existing post by slug FIRST. Update if exists, create only if new.** |
+| **Hashnode CDN S3 upload failures** | **Use Imgur as primary CDN. Hashnode's presigned S3 URLs often fail with auth errors.** |
+| **Image not verified before setting** | **Always curl -I the CDN URL and verify HTTP 200 before setting coverImageURL.** |
 
 ---
 
