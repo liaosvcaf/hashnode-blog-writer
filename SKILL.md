@@ -565,6 +565,8 @@ Use blog-to-wechat skill with URL: <PUBLISHED_HASHNODE_URL>
 | **Not verifying publish succeeded** | **Step 6: Query API after publish to confirm post exists and URL matches.** |
 | **Can't sync existing Jekyll posts** | **Step 0.5: Added workflow to extract from Jekyll frontmatter + content.** |
 | **Cover image path mismatch** | **Step 0.5: Handle both relative (`/assets/`) and absolute paths from Jekyll frontmatter.** |
+| **Hashnode post "disappears" after publish** | **Known Hashnode propagation issue. Post exists via API but not visible on homepage for 10-30 minutes. Wait for propagation. GitHub Pages is always source of truth. Check again after 30 min before re-publishing.** |
+| **Missing Open Graph tags on GitHub Pages** | **Jekyll layout must include og:image, og:title, og:description, twitter:card in _includes/head.html. Without these, X.com shares won't show preview images.** |
 
 ---
 
